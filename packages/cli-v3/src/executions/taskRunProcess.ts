@@ -15,6 +15,7 @@ import {
 } from "@trigger.dev/core/v3/zodIpc";
 import { Evt } from "evt";
 import { ChildProcess, fork } from "node:child_process";
+import { setTimeout } from "node:timers/promises";
 import { chalkError, chalkGrey, chalkRun, prettyPrintDate } from "../utilities/cliOutput.js";
 
 import { execOptionsForRuntime, execPathForRuntime } from "@trigger.dev/core/v3/build";
@@ -196,7 +197,11 @@ export class TaskRunProcess {
   async #flush(timeoutInMs: number = 5_000) {
     logger.debug("flushing task run process", { pid: this.pid });
 
-    await this._ipc?.sendWithAck("FLUSH", { timeoutInMs }, timeoutInMs + 1_000);
+    // The second timeout acts as a backup for issues with the ipc timeout
+    await Promise.race([
+      this._ipc?.sendWithAck("FLUSH", { timeoutInMs }, timeoutInMs + 1_000),
+      setTimeout(timeoutInMs + 1_500),
+    ]);
   }
 
   async execute(): Promise<TaskRunExecutionResult> {
