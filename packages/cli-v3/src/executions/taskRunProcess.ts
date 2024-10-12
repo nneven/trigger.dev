@@ -264,7 +264,7 @@ export class TaskRunProcess {
 
   waitCompletedNotification() {
     if (!this._child?.connected || this._isBeingKilled || this._child.killed) {
-      console.error(
+      logger.error(
         "Child process not connected or being killed, can't send wait completed notification"
       );
       return;
