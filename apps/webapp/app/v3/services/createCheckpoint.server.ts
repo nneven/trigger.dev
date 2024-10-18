@@ -118,6 +118,7 @@ export class CreateCheckpointService extends BaseService {
           break;
         }
 
+        // TODO: Test this with idempotency
         if (lastChildRun.friendlyId !== reason.friendlyId) {
           logger.error("CreateCheckpointService: Checkpoint not for most recent child run", {
             attemptId: attempt.id,
@@ -148,6 +149,7 @@ export class CreateCheckpointService extends BaseService {
           break;
         }
 
+        // TODO: Test this with idempotency
         if (!reason.runFriendlyIds.includes(lastChildRun.friendlyId)) {
           logger.error("CreateCheckpointService: Checkpoint not for most recent batch", {
             attemptId: attempt.id,
