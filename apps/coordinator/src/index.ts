@@ -16,9 +16,10 @@ import { ChaosMonkey } from "./chaosMonkey";
 import { Checkpointer } from "./checkpointer";
 import { boolFromEnv, numFromEnv } from "./util";
 
-import { collectDefaultMetrics, register, Gauge } from "prom-client";
 import { SimpleStructuredLogger } from "@trigger.dev/core/v3/utils/structuredLogger";
-collectDefaultMetrics();
+import type * as promClient from "prom-client";
+
+type PromClient = typeof promClient;
 
 const HTTP_SERVER_PORT = Number(process.env.HTTP_SERVER_PORT || 8020);
 const NODE_NAME = process.env.NODE_NAME || "coordinator";
@@ -27,20 +28,27 @@ const DEFAULT_RETRY_DELAY_THRESHOLD_IN_MS = 30_000;
 const PLATFORM_ENABLED = ["1", "true"].includes(process.env.PLATFORM_ENABLED ?? "true");
 const PLATFORM_HOST = process.env.PLATFORM_HOST || "127.0.0.1";
 const PLATFORM_WS_PORT = process.env.PLATFORM_WS_PORT || 3030;
-const PLATFORM_SECRET = process.env.PLATFORM_SECRET || "coordinator-secret";
 const SECURE_CONNECTION = ["1", "true"].includes(process.env.SECURE_CONNECTION ?? "false");
-
-const logger = new SimpleStructuredLogger("coordinator", undefined, { nodeName: NODE_NAME });
-const chaosMonkey = new ChaosMonkey(
-  !!process.env.CHAOS_MONKEY_ENABLED,
-  !!process.env.CHAOS_MONKEY_DISABLE_ERRORS,
-  !!process.env.CHAOS_MONKEY_DISABLE_DELAYS
-);
 
 class CheckpointReadinessTimeoutError extends Error {}
 class CheckpointCancelError extends Error {}
 
 class TaskCoordinator {
+  private port: number;
+  private host: string;
+
+  private nodeName: string;
+  private platformSecret: string;
+
+  private logger: SimpleStructuredLogger;
+  private promClient?: PromClient;
+
+  private chaosMonkey = new ChaosMonkey(
+    !!process.env.CHAOS_MONKEY_ENABLED,
+    !!process.env.CHAOS_MONKEY_DISABLE_ERRORS,
+    !!process.env.CHAOS_MONKEY_DISABLE_DELAYS
+  );
+
   #httpServer: ReturnType<typeof createServer>;
   #checkpointer = new Checkpointer({
     dockerMode: !process.env.KUBERNETES_PORT,
@@ -54,7 +62,7 @@ class TaskCoordinator {
     simulatePushFailureSeconds: numFromEnv("SIMULATE_PUSH_FAILURE_SECONDS", 300),
     simulateCheckpointFailure: boolFromEnv("SIMULATE_CHECKPOINT_FAILURE", false),
     simulateCheckpointFailureSeconds: numFromEnv("SIMULATE_CHECKPOINT_FAILURE_SECONDS", 300),
-    chaosMonkey,
+    chaosMonkey: this.chaosMonkey,
   });
 
   #prodWorkerNamespace?: ZodNamespace<
@@ -74,22 +82,44 @@ class TaskCoordinator {
 
   #delayThresholdInMs: number = DEFAULT_RETRY_DELAY_THRESHOLD_IN_MS;
 
-  constructor(
-    private port: number,
-    private host = "0.0.0.0"
-  ) {
+  constructor({
+    host,
+    port,
+    nodeName,
+    promClient,
+    platformSecret,
+  }: {
+    host?: string;
+    port: number;
+    nodeName?: string;
+    promClient?: PromClient;
+    platformSecret?: string;
+  }) {
+    this.host = host || "0.0.0.0";
+    this.port = port;
+
+    this.nodeName = nodeName || "coordinator";
+    this.platformSecret = platformSecret ?? (process.env.PLATFORM_SECRET || "coordinator-secret");
+
+    this.logger = new SimpleStructuredLogger("coordinator", undefined, { nodeName: this.nodeName });
+    this.promClient = promClient;
+
     this.#httpServer = this.#createHttpServer();
     this.#checkpointer.init();
     this.#platformSocket = this.#createPlatformSocket();
 
-    const connectedTasksTotal = new Gauge({
+    if (!this.promClient) {
+      return;
+    }
+
+    const connectedTasksTotal = new this.promClient.Gauge({
       name: "daemon_connected_tasks_total", // don't change this without updating dashboard config
       help: "The number of tasks currently connected.",
       collect: () => {
         connectedTasksTotal.set(this.#prodWorkerNamespace?.namespace.sockets.size ?? 0);
       },
     });
-    register.registerMetric(connectedTasksTotal);
+    this.promClient.register.registerMetric(connectedTasksTotal);
   }
 
   #returnValidatedExtraHeaders(headers: Record<string, string>) {
@@ -105,7 +135,7 @@ class TaskCoordinator {
   // MARK: SOCKET: PLATFORM
   #createPlatformSocket() {
     if (!PLATFORM_ENABLED) {
-      logger.log("INFO: platform connection disabled");
+      this.logger.log("INFO: platform connection disabled");
       return;
     }
 
@@ -131,7 +161,7 @@ class TaskCoordinator {
       extraHeaders,
       clientMessages: CoordinatorToPlatformMessages,
       serverMessages: PlatformToCoordinatorMessages,
-      authToken: PLATFORM_SECRET,
+      authToken: this.platformSecret,
       logHandlerPayloads: false,
       handlers: {
         RESUME_AFTER_DEPENDENCY: async (message) => {
@@ -157,7 +187,7 @@ class TaskCoordinator {
           log.addFields({ socketId: taskSocket.id, socketData: taskSocket.data });
           log.log("Found task socket for RESUME_AFTER_DEPENDENCY");
 
-          await chaosMonkey.call();
+          await this.chaosMonkey.call();
 
           // In case the task resumed faster than we could checkpoint
           this.#cancelCheckpoint(message.runId);
@@ -207,7 +237,7 @@ class TaskCoordinator {
             };
           }
 
-          await chaosMonkey.call();
+          await this.chaosMonkey.call();
 
           // In case the task resumed faster than we could checkpoint
           this.#cancelCheckpoint(message.runId);
@@ -236,7 +266,7 @@ class TaskCoordinator {
           log.addFields({ socketId: taskSocket.id, socketData: taskSocket.data });
           log.log("Found task socket for RESUME_AFTER_DURATION");
 
-          await chaosMonkey.call();
+          await this.chaosMonkey.call();
 
           taskSocket.emit("RESUME_AFTER_DURATION", message);
         },
@@ -251,7 +281,7 @@ class TaskCoordinator {
           const taskSocket = await this.#getAttemptSocket(message.attemptFriendlyId);
 
           if (!taskSocket) {
-            logger.debug("Socket for attempt not found");
+            log.debug("Socket for attempt not found");
             return;
           }
 
@@ -271,7 +301,7 @@ class TaskCoordinator {
           const taskSocket = await this.#getRunSocket(message.runId);
 
           if (!taskSocket) {
-            logger.debug("Socket for run not found");
+            log.debug("Socket for run not found");
             return;
           }
 
@@ -301,14 +331,14 @@ class TaskCoordinator {
           const taskSocket = await this.#getRunSocket(message.runId);
 
           if (!taskSocket) {
-            logger.debug("Socket for attempt not found");
+            log.debug("Socket for attempt not found");
             return;
           }
 
           log.addFields({ socketId: taskSocket.id, socketData: taskSocket.data });
           log.log("Found task socket for READY_FOR_RETRY");
 
-          await chaosMonkey.call();
+          await this.chaosMonkey.call();
 
           taskSocket.emit("READY_FOR_RETRY", message);
         },
@@ -639,7 +669,7 @@ class TaskCoordinator {
               return;
             }
 
-            await chaosMonkey.call();
+            await this.chaosMonkey.call();
 
             socket.emit("EXECUTE_TASK_RUN_LAZY_ATTEMPT", {
               version: "v1",
@@ -714,7 +744,7 @@ class TaskCoordinator {
             // Cancel all in-progress checkpoints (if any)
             this.#cancelCheckpoint(socket.data.runId);
 
-            await chaosMonkey.call({ throwErrors: false });
+            await this.chaosMonkey.call({ throwErrors: false });
 
             const completeWithoutCheckpoint = (shouldExit: boolean) => {
               const supportsRetryCheckpoints = message.version === "v1";
@@ -909,7 +939,7 @@ class TaskCoordinator {
           log.log("Handling WAIT_FOR_DURATION");
 
           try {
-            await chaosMonkey.call({ throwErrors: false });
+            await this.chaosMonkey.call({ throwErrors: false });
 
             if (checkpointInProgress()) {
               log.error("Checkpoint already in progress");
@@ -994,7 +1024,7 @@ class TaskCoordinator {
           log.log("Handling WAIT_FOR_TASK");
 
           try {
-            await chaosMonkey.call({ throwErrors: false });
+            await this.chaosMonkey.call({ throwErrors: false });
 
             if (checkpointInProgress()) {
               log.error("Checkpoint already in progress");
@@ -1087,7 +1117,7 @@ class TaskCoordinator {
           log.log("Handling WAIT_FOR_BATCH", message);
 
           try {
-            await chaosMonkey.call({ throwErrors: false });
+            await this.chaosMonkey.call({ throwErrors: false });
 
             if (checkpointInProgress()) {
               log.error("Checkpoint already in progress");
@@ -1237,7 +1267,7 @@ class TaskCoordinator {
           log.log("Handling CREATE_TASK_RUN_ATTEMPT");
 
           try {
-            await chaosMonkey.call({ throwErrors: false });
+            await this.chaosMonkey.call({ throwErrors: false });
 
             const createAttempt = await this.#platformSocket?.sendWithAck(
               "CREATE_TASK_RUN_ATTEMPT",
@@ -1349,7 +1379,7 @@ class TaskCoordinator {
     // Cancel checkpointing procedure
     const checkpointCanceled = this.#checkpointer.cancelCheckpoint(runId);
 
-    logger.log("cancelCheckpoint()", { runId, checkpointCanceled });
+    this.logger.log("cancelCheckpoint()", { runId, checkpointCanceled });
 
     return checkpointCanceled;
   }
@@ -1357,7 +1387,7 @@ class TaskCoordinator {
   // MARK: HTTP SERVER
   #createHttpServer() {
     const httpServer = createServer(async (req, res) => {
-      logger.log(`[${req.method}]`, { url: req.url });
+      this.logger.log(`[${req.method}]`, { url: req.url });
 
       const reply = new HttpReply(res);
 
@@ -1366,10 +1396,18 @@ class TaskCoordinator {
           return reply.text("ok");
         }
         case "/metrics": {
-          return reply.text(await register.metrics(), 200, register.contentType);
+          if (!this.promClient) {
+            return reply.empty(404);
+          }
+
+          return reply.text(
+            await this.promClient.register.metrics(),
+            200,
+            this.promClient.register.contentType
+          );
         }
         case "/whoami": {
-          return reply.text(NODE_NAME);
+          return reply.text(this.nodeName);
         }
         case "/checkpoint": {
           const body = await getTextBody(req);
@@ -1387,7 +1425,7 @@ class TaskCoordinator {
     });
 
     httpServer.on("listening", () => {
-      logger.log("server listening on port", { port: HTTP_SERVER_PORT });
+      this.logger.log("server listening on port", { port: this.port });
     });
 
     return httpServer;
@@ -1398,5 +1436,7 @@ class TaskCoordinator {
   }
 }
 
-const coordinator = new TaskCoordinator(HTTP_SERVER_PORT);
+const coordinator = new TaskCoordinator({
+  port: HTTP_SERVER_PORT,
+});
 coordinator.listen();
