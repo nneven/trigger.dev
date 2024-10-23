@@ -22,7 +22,6 @@ import type * as promClient from "prom-client";
 type PromClient = typeof promClient;
 
 const HTTP_SERVER_PORT = Number(process.env.HTTP_SERVER_PORT || 8020);
-const NODE_NAME = process.env.NODE_NAME || "coordinator";
 const DEFAULT_RETRY_DELAY_THRESHOLD_IN_MS = 30_000;
 
 const PLATFORM_ENABLED = ["1", "true"].includes(process.env.PLATFORM_ENABLED ?? "true");
@@ -1438,5 +1437,6 @@ class TaskCoordinator {
 
 const coordinator = new TaskCoordinator({
   port: HTTP_SERVER_PORT,
+  nodeName: process.env.NODE_NAME,
 });
 coordinator.listen();
