@@ -99,12 +99,18 @@ importers:
 
   apps/docker-provider:
     dependencies:
+      '@trigger.dev/coordinator':
+        specifier: workspace:*
+        version: link:../../internal-packages/coordinator
       '@trigger.dev/core':
         specifier: workspace:*
         version: link:../../packages/core
       execa:
         specifier: ^8.0.1
         version: 8.0.1
+      prom-client:
+        specifier: ^15.1.0
+        version: 15.1.0
     devDependencies:
       '@types/node':
         specifier: ^18.19.8

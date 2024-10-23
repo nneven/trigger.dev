@@ -11,14 +11,13 @@ import {
 } from "@trigger.dev/core/v3";
 import { ZodNamespace } from "@trigger.dev/core/v3/zodNamespace";
 import { ZodSocketConnection } from "@trigger.dev/core/v3/zodSocket";
-import { HttpReply, getTextBody } from "@trigger.dev/core/v3/apps";
+import { HttpReply, type TaskTracker, getTextBody } from "@trigger.dev/core/v3/apps";
+import { SimpleStructuredLogger } from "@trigger.dev/core/v3/utils/structuredLogger";
 import { ChaosMonkey } from "./chaosMonkey";
 import { Checkpointer } from "./checkpointer";
 import { boolFromEnv, numFromEnv } from "./util";
 
-import { SimpleStructuredLogger } from "@trigger.dev/core/v3/utils/structuredLogger";
 import type * as promClient from "prom-client";
-
 type PromClient = typeof promClient;
 
 const DEFAULT_RETRY_DELAY_THRESHOLD_IN_MS = 30_000;
@@ -40,6 +39,8 @@ export class TaskCoordinator {
 
   private logger: SimpleStructuredLogger;
   private promClient?: PromClient;
+  private dockerMode: boolean;
+  private taskTracker?: TaskTracker;
 
   private chaosMonkey = new ChaosMonkey(
     !!process.env.CHAOS_MONKEY_ENABLED,
@@ -48,20 +49,7 @@ export class TaskCoordinator {
   );
 
   #httpServer: ReturnType<typeof createServer>;
-  #checkpointer = new Checkpointer({
-    dockerMode: !process.env.KUBERNETES_PORT,
-    forceSimulate: boolFromEnv("FORCE_CHECKPOINT_SIMULATION", false),
-    heartbeat: this.#sendRunHeartbeat.bind(this),
-    registryHost: process.env.REGISTRY_HOST,
-    registryNamespace: process.env.REGISTRY_NAMESPACE,
-    registryTlsVerify: boolFromEnv("REGISTRY_TLS_VERIFY", true),
-    disableCheckpointSupport: boolFromEnv("DISABLE_CHECKPOINT_SUPPORT", false),
-    simulatePushFailure: boolFromEnv("SIMULATE_PUSH_FAILURE", false),
-    simulatePushFailureSeconds: numFromEnv("SIMULATE_PUSH_FAILURE_SECONDS", 300),
-    simulateCheckpointFailure: boolFromEnv("SIMULATE_CHECKPOINT_FAILURE", false),
-    simulateCheckpointFailureSeconds: numFromEnv("SIMULATE_CHECKPOINT_FAILURE_SECONDS", 300),
-    chaosMonkey: this.chaosMonkey,
-  });
+  #checkpointer: Checkpointer;
 
   #prodWorkerNamespace?: ZodNamespace<
     typeof ProdWorkerToCoordinatorMessages,
@@ -86,12 +74,16 @@ export class TaskCoordinator {
     nodeName,
     promClient,
     platformSecret,
+    dockerMode,
+    taskTracker,
   }: {
     host?: string;
     port: number;
     nodeName?: string;
     promClient?: PromClient;
     platformSecret?: string;
+    dockerMode?: boolean;
+    taskTracker?: TaskTracker;
   }) {
     this.host = host || "0.0.0.0";
     this.port = port;
@@ -102,8 +94,28 @@ export class TaskCoordinator {
     this.logger = new SimpleStructuredLogger("coordinator", undefined, { nodeName: this.nodeName });
     this.promClient = promClient;
 
+    this.dockerMode = dockerMode ?? !process.env.KUBERNETES_PORT;
+    this.taskTracker = taskTracker;
+
     this.#httpServer = this.#createHttpServer();
+
+    this.#checkpointer = new Checkpointer({
+      dockerMode: this.dockerMode,
+      forceSimulate: boolFromEnv("FORCE_CHECKPOINT_SIMULATION", false),
+      heartbeat: this.#sendRunHeartbeat.bind(this),
+      registryHost: process.env.REGISTRY_HOST,
+      registryNamespace: process.env.REGISTRY_NAMESPACE,
+      registryTlsVerify: boolFromEnv("REGISTRY_TLS_VERIFY", true),
+      checkpointPath: process.env.CHECKPOINT_PATH,
+      disableCheckpointSupport: boolFromEnv("DISABLE_CHECKPOINT_SUPPORT", false),
+      simulatePushFailure: boolFromEnv("SIMULATE_PUSH_FAILURE", false),
+      simulatePushFailureSeconds: numFromEnv("SIMULATE_PUSH_FAILURE_SECONDS", 300),
+      simulateCheckpointFailure: boolFromEnv("SIMULATE_CHECKPOINT_FAILURE", false),
+      simulateCheckpointFailureSeconds: numFromEnv("SIMULATE_CHECKPOINT_FAILURE_SECONDS", 300),
+      chaosMonkey: this.chaosMonkey,
+    });
     this.#checkpointer.init();
+
     this.#platformSocket = this.#createPlatformSocket();
 
     if (!this.promClient) {
@@ -319,6 +331,8 @@ export class TaskCoordinator {
               version: "v1",
             });
           }
+
+          this.taskTracker?.deleteTask(message.runId);
         },
         READY_FOR_RETRY: async (message) => {
           const log = platformLogger.child({
@@ -454,6 +468,8 @@ export class TaskCoordinator {
           socket.emit("REQUEST_EXIT", {
             version: "v1",
           });
+
+          this.taskTracker?.deleteTask(socket.data.runId);
         };
 
         const crashRun = async (error: { name: string; message: string; stack?: string }) => {
@@ -752,7 +768,12 @@ export class TaskCoordinator {
                 execution,
                 completion,
               });
+
               callback({ willCheckpointAndRestore: false, shouldExit });
+
+              if (shouldExit) {
+                this.taskTracker?.deleteTask(socket.data.runId);
+              }
             };
 
             if (completion.ok) {

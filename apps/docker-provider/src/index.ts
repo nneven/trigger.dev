@@ -1,4 +1,8 @@
 import { $, type ExecaChildProcess, execa } from "execa";
+
+import * as promClient from "prom-client";
+promClient.collectDefaultMetrics();
+
 import {
   ProviderShell,
   TaskOperations,
@@ -6,13 +10,13 @@ import {
   TaskOperationsIndexOptions,
   TaskOperationsRestoreOptions,
 } from "@trigger.dev/core/v3/apps";
-import { SimpleLogger } from "@trigger.dev/core/v3/apps";
-import { isExecaChildProcess, testDockerCheckpoint } from "@trigger.dev/core/v3/apps";
+import { SimpleLogger, TaskTracker, isExecaChildProcess, testDockerCheckpoint } from "@trigger.dev/core/v3/apps";
 import { setTimeout } from "node:timers/promises";
 import { PostStartCauses, PreStopCauses } from "@trigger.dev/core/v3";
+import { TaskCoordinator } from "@trigger.dev/coordinator";
 
 const MACHINE_NAME = process.env.MACHINE_NAME || "local";
-const COORDINATOR_PORT = process.env.COORDINATOR_PORT || 8020;
+const COORDINATOR_PORT = Number(process.env.COORDINATOR_PORT || 8020);
 const COORDINATOR_HOST = process.env.COORDINATOR_HOST || "127.0.0.1";
 const DOCKER_NETWORK = process.env.DOCKER_NETWORK || "host";
 
@@ -24,6 +28,7 @@ const FORCE_CHECKPOINT_SIMULATION = ["1", "true"].includes(
 );
 
 const logger = new SimpleLogger(`[${MACHINE_NAME}]`);
+const taskTracker = new TaskTracker();
 
 type TaskOperationsInitReturn = {
   canCheckpoint: boolean;
@@ -105,6 +110,8 @@ class DockerTaskOperations implements TaskOperations {
         `${opts.imageRef}`,
       ])
     );
+
+    return { success: true };
   }
 
   async create(opts: TaskOperationsCreateOptions) {
@@ -133,6 +140,8 @@ class DockerTaskOperations implements TaskOperations {
 
     try {
       logger.debug(await execa("docker", runArgs));
+
+      return { success: true };
     } catch (error) {
       if (!isExecaChildProcess(error)) {
         throw error;
@@ -145,6 +154,8 @@ class DockerTaskOperations implements TaskOperations {
         stdout: error.stdout,
         stderr: error.stderr,
       });
+
+      return { success: false };
     }
   }
 
@@ -163,7 +174,8 @@ class DockerTaskOperations implements TaskOperations {
       }
 
       await this.#sendPostStart(containerName);
-      return;
+
+      return { success: true };
     }
 
     const { exitCode } = logger.debug(
@@ -171,10 +183,13 @@ class DockerTaskOperations implements TaskOperations {
     );
 
     if (exitCode !== 0) {
+      taskTracker.deleteTask(opts.runId);
       throw new Error("docker start command failed");
     }
 
     await this.#sendPostStart(containerName);
+
+    return { success: true };
   }
 
   async delete(opts: { runId: string }) {
@@ -266,9 +281,23 @@ class DockerTaskOperations implements TaskOperations {
   }
 }
 
+if (process.env.COORDINATOR_ENABLED) {
+  const coordinator = new TaskCoordinator({
+    port: COORDINATOR_PORT,
+    host: COORDINATOR_HOST,
+    platformSecret: process.env.PLATFORM_COORDINATOR_SECRET,
+    promClient,
+    dockerMode: true,
+    taskTracker,
+  });
+
+  coordinator.listen();
+}
+
 const provider = new ProviderShell({
   tasks: new DockerTaskOperations({ forceSimulate: FORCE_CHECKPOINT_SIMULATION }),
   type: "docker",
+  taskTracker,
 });
 
 provider.listen();

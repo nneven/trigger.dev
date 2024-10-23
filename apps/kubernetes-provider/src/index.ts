@@ -76,7 +76,7 @@ class KubernetesTaskOperations implements TaskOperations {
   }
 
   async index(opts: TaskOperationsIndexOptions) {
-    await this.#createJob(
+    const result = await this.#createJob(
       {
         metadata: {
           name: this.#getIndexContainerName(opts.shortCode),
@@ -144,12 +144,14 @@ class KubernetesTaskOperations implements TaskOperations {
       },
       this.#namespace
     );
+
+    return result;
   }
 
   async create(opts: TaskOperationsCreateOptions) {
     const containerName = this.#getRunContainerName(opts.runId, opts.nextAttemptNumber);
 
-    await this.#createPod(
+    const result = await this.#createPod(
       {
         metadata: {
           name: containerName,
@@ -207,10 +209,12 @@ class KubernetesTaskOperations implements TaskOperations {
       },
       this.#namespace
     );
+
+    return result;
   }
 
   async restore(opts: TaskOperationsRestoreOptions) {
-    await this.#createPod(
+    const result = await this.#createPod(
       {
         metadata: {
           name: `${this.#getRunContainerName(opts.runId)}-${opts.checkpointId.slice(-8)}`,
@@ -287,6 +291,8 @@ class KubernetesTaskOperations implements TaskOperations {
       },
       this.#namespace
     );
+
+    return result;
   }
 
   async delete(opts: { runId: string }) {
@@ -577,8 +583,16 @@ class KubernetesTaskOperations implements TaskOperations {
     try {
       const res = await this.#k8sApi.core.createNamespacedPod(namespace.metadata.name, pod);
       logger.debug(res.body);
+
+      return {
+        success: true,
+      };
     } catch (err: unknown) {
       this.#handleK8sError(err);
+
+      return {
+        success: false,
+      };
     }
   }
 
@@ -608,8 +622,16 @@ class KubernetesTaskOperations implements TaskOperations {
     try {
       const res = await this.#k8sApi.batch.createNamespacedJob(namespace.metadata.name, job);
       logger.debug(res.body);
+
+      return {
+        success: true,
+      };
     } catch (err: unknown) {
       this.#handleK8sError(err);
+
+      return {
+        success: false,
+      };
     }
   }
 
@@ -620,8 +642,16 @@ class KubernetesTaskOperations implements TaskOperations {
         daemonSet
       );
       logger.debug(res.body);
+
+      return {
+        success: true,
+      };
     } catch (err: unknown) {
       this.#handleK8sError(err);
+
+      return {
+        success: false,
+      };
     }
   }
 

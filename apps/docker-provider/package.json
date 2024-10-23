@@ -16,8 +16,10 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@trigger.dev/coordinator": "workspace:*",
     "@trigger.dev/core": "workspace:*",
-    "execa": "^8.0.1"
+    "execa": "^8.0.1",
+    "prom-client": "^15.1.0"
   },
   "devDependencies": {
     "@types/node": "^18.19.8",

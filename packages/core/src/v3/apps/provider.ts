@@ -15,13 +15,13 @@ import {
 } from "../schemas/messages.js";
 import { ZodMessageSender } from "../zodMessageHandler.js";
 import { ZodSocketConnection } from "../zodSocket.js";
+import type { TaskTracker } from "./taskTracker.js";
 
 const HTTP_SERVER_PORT = Number(process.env.HTTP_SERVER_PORT || getRandomPortNumber());
 const MACHINE_NAME = process.env.MACHINE_NAME || "local";
 
 const PLATFORM_HOST = process.env.PLATFORM_HOST || "127.0.0.1";
 const PLATFORM_WS_PORT = process.env.PLATFORM_WS_PORT || 3030;
-const PLATFORM_SECRET = process.env.PLATFORM_SECRET || "provider-secret";
 const SECURE_CONNECTION = ["1", "true"].includes(process.env.SECURE_CONNECTION ?? "false");
 
 const logger = new SimpleLogger(`[${MACHINE_NAME}]`);
@@ -77,13 +77,17 @@ export interface TaskOperationsPrePullDeploymentOptions {
   deploymentId: string;
 }
 
+type TaskOperationResult = {
+  success: boolean;
+};
+
 export interface TaskOperations {
   init: () => Promise<any>;
 
   // CRUD
-  index: (opts: TaskOperationsIndexOptions) => Promise<any>;
-  create: (opts: TaskOperationsCreateOptions) => Promise<any>;
-  restore: (opts: TaskOperationsRestoreOptions) => Promise<any>;
+  index: (opts: TaskOperationsIndexOptions) => Promise<TaskOperationResult>;
+  create: (opts: TaskOperationsCreateOptions) => Promise<TaskOperationResult>;
+  restore: (opts: TaskOperationsRestoreOptions) => Promise<TaskOperationResult>;
 
   // unimplemented
   delete?: (...args: any[]) => Promise<any>;
@@ -97,6 +101,8 @@ type ProviderShellOptions = {
   type: "docker" | "kubernetes";
   host?: string;
   port?: number;
+  secret?: string;
+  taskTracker?: TaskTracker;
 };
 
 interface Provider {
@@ -105,6 +111,7 @@ interface Provider {
 
 export class ProviderShell implements Provider {
   tasks: TaskOperations;
+  private platformSecret: string;
 
   #httpPort: number;
   #httpServer: ReturnType<typeof createServer>;
@@ -114,9 +121,13 @@ export class ProviderShell implements Provider {
   >;
 
   constructor(private options: ProviderShellOptions) {
+    this.platformSecret = options.secret ?? (process.env.PLATFORM_SECRET || "provider-secret");
+
     this.tasks = options.tasks;
+
     this.#httpPort = options.port ?? HTTP_SERVER_PORT;
     this.#httpServer = this.#createHttpServer();
+
     this.platformSocket = this.#createPlatformSocket();
     this.#createSharedQueueSocket();
   }
@@ -129,7 +140,7 @@ export class ProviderShell implements Provider {
       secure: SECURE_CONNECTION,
       clientMessages: ClientToSharedQueueMessages,
       serverMessages: SharedQueueToClientMessages,
-      authToken: PLATFORM_SECRET,
+      authToken: this.platformSecret,
       handlers: {
         SERVER_READY: async (message) => {
           // TODO: create new schema without worker requirement
@@ -139,8 +150,16 @@ export class ProviderShell implements Provider {
         },
         BACKGROUND_WORKER_MESSAGE: async (message) => {
           if (message.data.type === "SCHEDULE_ATTEMPT") {
+            let success = false;
+
+            this.options.taskTracker?.addTask({
+              id: message.data.runId,
+              cpu: message.data.machine.cpu,
+              memory: message.data.machine.memory,
+            });
+
             try {
-              await this.tasks.create({
+              const create = await this.tasks.create({
                 image: message.data.image,
                 machine: message.data.machine,
                 version: message.data.version,
@@ -152,8 +171,16 @@ export class ProviderShell implements Provider {
                 projectId: message.data.projectId,
                 runId: message.data.runId,
               });
+
+              success = create.success;
             } catch (error) {
               logger.error("create failed", error);
+
+              success = false;
+            }
+
+            if (!success) {
+              this.options.taskTracker?.deleteTask(message.data.runId);
             }
           }
         },
@@ -186,11 +213,13 @@ export class ProviderShell implements Provider {
       secure: SECURE_CONNECTION,
       clientMessages: ProviderToPlatformMessages,
       serverMessages: PlatformToProviderMessages,
-      authToken: PLATFORM_SECRET,
+      authToken: this.platformSecret,
       extraHeaders: {
         "x-trigger-provider-type": this.options.type,
       },
       handlers: {
+        // TODO: resource limits should come from the platform
+        //       indexing tasks should be handled like any other task
         INDEX: async (message) => {
           try {
             await this.tasks.index({
@@ -276,8 +305,16 @@ export class ProviderShell implements Provider {
             return;
           }
 
+          let success = false;
+
+          this.options.taskTracker?.addTask({
+            id: message.runId,
+            cpu: message.machine.cpu,
+            memory: message.machine.memory,
+          });
+
           try {
-            await this.tasks.restore({
+            const restore = await this.tasks.restore({
               checkpointRef: message.location,
               machine: message.machine,
               imageRef: message.imageRef,
@@ -290,10 +327,20 @@ export class ProviderShell implements Provider {
               runId: message.runId,
               checkpointId: message.checkpointId,
             });
+
+            success = restore.success;
           } catch (error) {
             logger.error("restore failed", error);
+
+            success = false;
+          }
+
+          if (!success) {
+            this.options.taskTracker?.deleteTask(message.runId);
           }
         },
+        // TODO: resource limits should come from the platform
+        //       pre-pull tasks should be handled like any other task
         PRE_PULL_DEPLOYMENT: async (message) => {
           if (!this.tasks.prePullDeployment) {
             logger.debug("prePullDeployment not implemented", message);

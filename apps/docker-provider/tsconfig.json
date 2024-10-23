@@ -9,7 +9,9 @@
     "skipLibCheck": true,
     "paths": {
       "@trigger.dev/core/v3": ["../../packages/core/src/v3"],
-      "@trigger.dev/core/v3/*": ["../../packages/core/src/v3/*"]
+      "@trigger.dev/core/v3/*": ["../../packages/core/src/v3/*"],
+      "@trigger.dev/coordinator": ["../../internal-packages/coordinator/src"],
+      "@trigger.dev/coordinator/*": ["../../internal-packages/coordinator/src/*"]
     }
   }
 }
