@@ -1,0 +1,22 @@
+{
+  "name": "@trigger.dev/coordinator",
+  "private": true,
+  "version": "0.0.1",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trigger.dev/core": "workspace:*",
+    "nanoid": "^5.0.6",
+    "prom-client": "^15.1.0",
+    "socket.io": "4.7.4",
+    "tinyexec": "^0.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
